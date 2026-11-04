@@ -155,6 +155,9 @@ const F = Object.fromEntries(FOODS.map(f=>[f[0],{kcal:f[1],p:f[2],c:f[3],f:f[4],
 
 /* ---------- STATE ---------- */
 const LS_KEY = "nutrisnap_db_v1";
+const DEFAULT_GEMINI_KEY = "AQ.Ab8RN6IbabmarYW4NteNwLN1SE2KiaRPb_x2vbJQNgkN7SAHdQ";
+const GEMINI_MODEL = "gemini-2.5-flash";
+function getKey(){ return ((db.settings&&db.settings.geminiKey)||"").trim() || DEFAULT_GEMINI_KEY; }
 let db = load();
 let state = {tab:"home", theme: db.settings.theme||"light", draft:null, diaryFilter:"daily", compareA:null, compareB:null, chat:[], chatBusy:false, analysisBusy:false};
 
@@ -322,7 +325,7 @@ function downscale(dataUrl, cb){
 }
 async function startAnalysis(img, mime){
   state.draft={img, items:[], status:"analyzing"}; render();
-  const key=(db.settings.geminiKey||"").trim();
+  const key=getKey();
   if(key){ try{ const items=await geminiRecognize(img, key); state.draft={img, items, status:"confirm"}; render(); return; }catch(e){ toast("AI vision failed — confirm foods manually."); } }
   // No key / offline: fall back to manual confirmation with suggestions
   state.draft={img, items:[{name:"Chicken breast (cooked)",grams:150},{name:"Rice (white, cooked)",grams:200},{name:"Broccoli",grams:100}].map(x=>itemNutrients(x.name,x.grams)), status:"confirm"};
@@ -333,8 +336,8 @@ async function geminiRecognize(imgDataUrl, key){
   const b64=imgDataUrl.split(",")[1];
   const foodList=FOODS.map(f=>f[0]).join(", ");
   const prompt=`You are a food recognition assistant. Look at this meal photo. Identify every distinct food item and estimate portion size in grams. Reply with ONLY a JSON array, no markdown, like: [{"name":"Chicken breast (cooked)","grams":150}]. Choose names ONLY from this list: ${foodList}. If a food isn't in the list, pick the closest match. Be realistic with portion sizes. If no food is visible, return [].`;
-  const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(key)}`,{
-    method:"POST",headers:{"Content-Type":"application/json"},
+  const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,{
+    method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},
     body:JSON.stringify({contents:[{parts:[{text:prompt},{inline_data:{mime_type:"image/jpeg",data:b64}}]}]})});
   if(!res.ok) throw new Error("vision api");
   const data=await res.json();
@@ -395,8 +398,7 @@ function viewDiary(){
 function viewMeal(id){ const m=db.meals.find(x=>x.id===id); if(!m) return;
   alert(`${m.title} (${m.slot}, ${m.date} ${m.time})
 
-${m.items.map(i=>`• ${i.name} — ${i.grams} g ≈ ${i.kcal} kcal (P ${i.p} / C ${i.c} / F ${i.f} / Fiber ${i.fib})`).join("
-")}
+${m.items.map(i=>`• ${i.name} — ${i.grams} g ≈ ${i.kcal} kcal (P ${i.p} / C ${i.c} / F ${i.f} / Fiber ${i.fib})`).join("\n")}
 
 TOTAL ≈ ${m.totals.kcal} kcal · P ${m.totals.p}g · C ${m.totals.c}g · F ${m.totals.f}g
 (Values are estimates, not exact.)`); }
@@ -478,9 +480,7 @@ function healthyAlt(name){
   const alts=FOODS.filter(x=>x[0]!==name && (x[2]>=f.p||x[1]<=f.kcal) && x[1]>0)
     .sort((a,b)=>(Math.abs(a[1]-f.kcal)+ (f.p-a[2])*4) - (Math.abs(b[1]-f.kcal)+(f.p-b[2])*4)).slice(0,3);
   if(!alts.length) return "";
-  return "🔄 Healthier alternatives (per 100 g):
-"+alts.map(a=>`• ${a[0]} — ${a[1]} kcal, ${a[2]}g protein`).join("
-");
+  return "🔄 Healthier alternatives (per 100 g):\n"+alts.map(a=>`• ${a[0]} — ${a[1]} kcal, ${a[2]}g protein`).join("\n");
 }
 function drawCharts(){
   const cv=$("#wkChart"); if(!cv) return;
@@ -507,11 +507,10 @@ async function sendChat(){
   state.chat.push({who:"me",text:q}); inp.value=""; renderChatOnly();
   state.chatBusy=true; showTyping();
   try{
-    const key=(db.settings.geminiKey||"").trim();
+    const key=getKey();
     let ans = key ? await geminiChat(q,key) : localAnswer(q);
     state.chat.push({who:"ai",text:ans});
-  }catch(e){ state.chat.push({who:"ai",text:"I couldn't reach the AI service. (Local answer): 
-"+localAnswer(q)}); }
+  }catch(e){ state.chat.push({who:"ai",text:"I couldn't reach the AI service. (Local answer): \n"+localAnswer(q)}); }
   state.chatBusy=false; renderChatOnly();
 }
 function renderChatOnly(){ const w=$("#chatwrap"); if(!w){render();return;}
@@ -520,9 +519,7 @@ function showTyping(){ const w=$("#chatwrap"); if(w){ w.innerHTML+=`<div class="
 async function geminiChat(q,key){
   const t=dayTotals(todayStr());
   const ctx=`User's nutrition context (local estimates): Today ${t.kcal} kcal, P ${t.p}g, C ${t.c}g, F ${t.f}g, fiber ${t.fib}g. Goals: ${db.profile.calGoal} kcal, ${db.profile.proteinGoal}g protein. Meals today: ${mealsOn(todayStr()).map(m=>m.title+" ("+m.slot+", ~"+m.totals.kcal+" kcal, P "+m.totals.p+"g)").join("; ")||"none"}. Food db per 100g available for reference: ${FOODS.slice(0,40).map(f=>f[0]+" "+f[1]+"kcal P"+f[2]).join(", ")}... Be concise (under 120 words), friendly, and always note values are estimates. Never recommend extreme dieting.`;
-  const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(key)}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contents:[{parts:[{text:ctx+"
-
-User question: "+q}]}]})});
+  const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify({contents:[{parts:[{text:ctx+"\n\nUser question: "+q}]}]})});
   if(!res.ok) throw new Error();
   return (await res.json()).candidates?.[0]?.content?.parts?.[0]?.text || localAnswer(q);
 }
@@ -532,13 +529,7 @@ function localAnswer(q){
   if(/most protein|which meal/.test(s)){ const ms=mealsOn(todayStr()); if(!ms.length) return "No meals logged today yet — scan something!";
     const top=ms.slice().sort((a,b)=>b.totals.p-a.totals.p)[0];
     return `Your highest-protein meal today is "${top.title}" (${top.slot}) with ≈${top.totals.p}g protein and ${top.totals.kcal} kcal.`; }
-  if(/balanced meal|suggest.*meal|what should i eat/.test(s)) return "Here's a balanced plate idea:
-• Grilled chicken or tofu (palm-sized) — protein
-• Brown rice or quinoa (fist-sized) — carbs
-• Big handful of broccoli/spinach — fiber & micronutrients
-• A thumb of olive oil or avocado — healthy fats
-
-≈550–650 kcal, ~40g protein. (Estimates vary with portions.)";
+  if(/balanced meal|suggest.*meal|what should i eat/.test(s)) return "Here's a balanced plate idea:\n• Grilled chicken or tofu (palm-sized) — protein\n• Brown rice or quinoa (fist-sized) — carbs\n• Big handful of broccoli/spinach — fiber & micronutrients\n• A thumb of olive oil or avocado — healthy fats\n\n≈550–650 kcal, ~40g protein. (Estimates vary with portions.)";
   if(/nutrient|nutrition.* in /.test(s)){ const hit=FOODS.find(f=>s.includes(f[0].split(" (")[0].toLowerCase()));
     if(hit){ const f=F[hit[0]]; return `${hit[0]} per 100 g:
 ≈${f.kcal} kcal · ${f.p}g protein · ${f.c}g carbs · ${f.f}g fat · ${f.fib}g fiber.
@@ -558,15 +549,7 @@ Consistency beats perfection — keep the streak going! 🔥`; }
   if(/streak/.test(s)) return `You're on a ${calcStreak()}-day logging streak! ${calcStreak()>=7?"Impressive consistency. 🏆":"Log a meal today to keep it alive."}`;
   if(/calorie|kcal/.test(s)) return `Today: ≈${t.kcal} kcal of your ${db.profile.calGoal||2000} kcal goal — ${Math.max(0,(db.profile.calGoal||2000)-t.kcal)} remaining. Remember: day-to-day wiggles are normal; the weekly average is what matters.`;
   if(/hello|hi|hey/.test(s)) return "Hey! 👋 I can check your protein, summarize your week, suggest balanced meals, or break down nutrients in a food. What would you like to know?";
-  return "I can help with:
-• Protein eaten today
-• Highest-protein meal
-• Balanced meal ideas
-• Nutrients in a specific food
-• Weekly summary
-• Water & streak status
-
-Tip: add a Gemini API key in Profile for a full conversational AI.";
+  return "I can help with:\n• Protein eaten today\n• Highest-protein meal\n• Balanced meal ideas\n• Nutrients in a specific food\n• Weekly summary\n• Water & streak status\n\nTip: add a Gemini API key in Profile for a full conversational AI.";
 }
 
 /* ---------- PROFILE ---------- */
@@ -596,7 +579,7 @@ function viewProfile(){
   </div>
   <div class="card"><h2 style="font-size:16px;margin-bottom:8px">🔑 AI Vision API (Gemini)</h2>
     <p class="small" style="margin-bottom:10px;line-height:1.5">For real AI photo recognition, paste a Gemini API key. It is stored only on your device (localStorage) and sent directly to Google — never to any other server. For a production app, route calls through your own backend so keys stay server-side.</p>
-    <div class="field"><label>Gemini API key (optional)</label><input type="password" id="s-key" value="${esc(s.geminiKey||"")}" placeholder="AIza…"></div>
+    <div class="field"><label>Gemini API key (optional)</label><input type="password" id="s-key" value="${esc(s.geminiKey||"")}" placeholder="Using built-in key — paste another to override"></div>
     <button class="btn btn-soft" onclick="saveKey()">Save key</button>
     <p class="small" style="margin-top:8px">Without a key, the app falls back to manual confirmation with suggested items. Get a free key at aistudio.google.com.</p>
   </div>
@@ -625,14 +608,14 @@ function saveProfile(){
     proteinGoal:+$("#g-prot").value||120, waterGoal:+$("#g-water").value||8 };
   save(); toast("Profile saved ✓");
 }
-function saveKey(){ db.settings.geminiKey=$("#s-key").value.trim(); save(); toast(db.settings.geminiKey?"Key saved — AI scan enabled!":"Key removed"); }
+function saveKey(){ db.settings.geminiKey=$("#s-key").value.trim(); save(); toast(db.settings.geminiKey?"Key saved — AI scan enabled!":"Custom key removed (built-in key active)"); }
 function exportData(){
   const blob=new Blob([JSON.stringify(db,null,2)],{type:"application/json"});
   const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="nutrisnap-export.json"; a.click();
 }
 
 /* ---------- BOOT ---------- */
-render();
+try{ render(); }catch(e){ document.getElementById("app").innerHTML="<pre style='padding:20px;white-space:pre-wrap'>Error: "+esc(e.message)+"</pre>"; console.error(e); }
 </script>
 </body>
 </html>
